@@ -21,7 +21,7 @@ template <typename T> inline
 T tabs(const T& v) { return v < 0 ? -v : v; }
 
 template<typename T>
-T getNorm(const T* vector, const int size) {
+T vectorNorm(const T* vector, const int size) {
 	T result = tabs(vector[0]);
 	for (int i = 1; i < size; ++i) {
 		if (tabs(vector[i]) > result) {
@@ -33,7 +33,7 @@ T getNorm(const T* vector, const int size) {
 }
 
 template<typename T>
-T getAchivedAccuracy(const T* A, const T* b, const T* x, const int numberEquations) {
+T achivedAccuracy(const T* A, const T* b, const T* x, const int numberEquations) {
 	T* diff = new T[numberEquations];
 	for (int i = 0; i < numberEquations; ++i) {
 		T sum = 0;
@@ -43,16 +43,17 @@ T getAchivedAccuracy(const T* A, const T* b, const T* x, const int numberEquatio
 		diff[i] = sum - b[i];
 	}
 
-	T result = getNorm(diff, numberEquations);
+	T result = vectorNorm(diff, numberEquations);
 	delete[] diff;
 
 	return result;
 }
 
 template <typename T>
-void JacobiOnAccessors(const sycl::device& device, const T* A, const T* b, const int numberEquations, const int targetAccuracy, const int maximalNumberIterations) {
+void JacobiOnAccessors(const sycl::device& device, const T* A, const T* b, const int numberEquations, const double targetAccuracy, const int maximalNumberIterations) {
 	sycl::queue que(device, exception_handler, { sycl::property::queue::enable_profiling() });
-	size_t timeExecution = 0;
+	size_t allTime = 0;
+	int it = 0;
 
 	T* x1 = new T[numberEquations];
 	memset(x1, 0, sizeof(T) * numberEquations);
@@ -67,7 +68,7 @@ void JacobiOnAccessors(const sycl::device& device, const T* A, const T* b, const
 
 		auto pBuffX1 = &bufX1;
 		auto pBuffX2 = &bufX2;
-		for (int it = 0; it < maximalNumberIterations; ++it) {
+		for (it = 0; it < maximalNumberIterations; ++it) {
 			sycl::event e = que.submit([&](sycl::handler& cgh) {
 				sycl::accessor accA(bufA, cgh, sycl::read_only);
 				sycl::accessor accB(bufB, cgh, sycl::read_only);
@@ -88,18 +89,18 @@ void JacobiOnAccessors(const sycl::device& device, const T* A, const T* b, const
 				});
 			e.wait();
 
-			timeExecution += e.get_profiling_info<sycl::info::event_profiling::command_end>() - e.get_profiling_info<sycl::info::event_profiling::command_start>();
+			allTime += e.get_profiling_info<sycl::info::event_profiling::command_end>() - e.get_profiling_info<sycl::info::event_profiling::command_start>();
 			std::swap(pBuffX1, pBuffX2);
 
 			auto hostDiff = bufDiff.get_host_access();
 			auto hostX1 = pBuffX1->get_host_access();
 
-			if (getNorm(hostDiff.get_pointer(), numberEquations) / getNorm(hostX1.get_pointer(), numberEquations) < targetAccuracy) {
+			if (vectorNorm(hostDiff.get_pointer(), numberEquations) / vectorNorm(hostX1.get_pointer(), numberEquations) < targetAccuracy) {
 				break;
 			}
 		}
 	}
-	std::cout << "[Accessors] Time: " << static_cast<double>(timeExecution) / 10e6 << " ms Accuracy: " << getAchivedAccuracy(A, b, x1, numberEquations) << std::endl;
+	std::cout << "[Accessors] Time: " << static_cast<double>(allTime) / 10e6 << " ms Accuracy: " << achivedAccuracy(A, b, x1, numberEquations) << " Iterations: " << it << std::endl;
 
 	delete[] x1;
 	delete[] x2;
@@ -107,9 +108,10 @@ void JacobiOnAccessors(const sycl::device& device, const T* A, const T* b, const
 }
 
 template <typename T>
-void JacobiOnShared(const sycl::device& device, const T* A, const T* b, const int numberEquations, const int targetAccuracy, const int maximalNumberIterations) {
+void JacobiOnShared(const sycl::device& device, const T* A, const T* b, const int numberEquations, const double targetAccuracy, const int maximalNumberIterations) {
 	sycl::queue que(device, exception_handler, { sycl::property::queue::enable_profiling() });
-	size_t timeExecution = 0;
+	size_t allTime = 0;
+	int it = 0;
 
 	T* x = new T[numberEquations];
 	{
@@ -127,7 +129,7 @@ void JacobiOnShared(const sycl::device& device, const T* A, const T* b, const in
 			}
 		}
 
-		for (int it = 0; it < maximalNumberIterations; ++it) {
+		for (it = 0; it < maximalNumberIterations; ++it) {
 			sycl::event e = que.submit([&](sycl::handler& cgh) {
 				cgh.parallel_for(sycl::range<1>(numberEquations), [=](sycl::id<1> item) {
 					sharedX2[item] = sharedB[item];
@@ -142,10 +144,10 @@ void JacobiOnShared(const sycl::device& device, const T* A, const T* b, const in
 				});
 			e.wait();
 
-			timeExecution += e.get_profiling_info<sycl::info::event_profiling::command_end>() - e.get_profiling_info<sycl::info::event_profiling::command_start>();
+			allTime += e.get_profiling_info<sycl::info::event_profiling::command_end>() - e.get_profiling_info<sycl::info::event_profiling::command_start>();
 			std::swap(sharedX1, sharedX2);
 
-			if (getNorm(sharedDiff, numberEquations) / getNorm(sharedX1, numberEquations) < targetAccuracy) {
+			if (vectorNorm(sharedDiff, numberEquations) / vectorNorm(sharedX1, numberEquations) < targetAccuracy) {
 				break;
 			}
 		}
@@ -160,15 +162,16 @@ void JacobiOnShared(const sycl::device& device, const T* A, const T* b, const in
 		sycl::free(sharedX2, que);
 		sycl::free(sharedDiff, que);
 	}
-	std::cout << "[Shared]    Time: " << static_cast<double>(timeExecution) / 10e6 << " ms Accuracy: " << getAchivedAccuracy(A, b, x, numberEquations) << std::endl;
+	std::cout << "[Shared]    Time: " << static_cast<double>(allTime) / 10e6 << " ms Accuracy: " << achivedAccuracy(A, b, x, numberEquations) << " Iterations: " << it << std::endl;
 
 	delete[] x;
 }
 
 template <typename T>
-void JacobiOnDevice(const sycl::device& device, const T* A, const T* b, const int numberEquations, const int targetAccuracy, const int maximalNumberIterations) {
+void JacobiOnDevice(const sycl::device& device, const T* A, const T* b, const int numberEquations, const double targetAccuracy, const int maximalNumberIterations) {
 	sycl::queue que(device, exception_handler, { sycl::property::queue::enable_profiling() });
-	size_t timeExecution = 0;
+	size_t allTime = 0;
+	int it = 0;
 
 	T* x = new T[numberEquations];
 	T* diff = new T[numberEquations];
@@ -183,7 +186,7 @@ void JacobiOnDevice(const sycl::device& device, const T* A, const T* b, const in
 		que.memcpy(deviceB, b, numberEquations * sizeof(T)).wait();
 		que.memset(deviceX1, 0, numberEquations * sizeof(T)).wait();
 
-		for (int it = 0; it < maximalNumberIterations; ++it) {
+		for (it = 0; it < maximalNumberIterations; ++it) {
 			sycl::event e = que.submit([&](sycl::handler& cgh) {
 				cgh.parallel_for(sycl::range<1>(numberEquations), [=](sycl::id<1> item) {
 					deviceX2[item] = deviceB[item];
@@ -198,13 +201,13 @@ void JacobiOnDevice(const sycl::device& device, const T* A, const T* b, const in
 				});
 			e.wait();
 
-			timeExecution += e.get_profiling_info<sycl::info::event_profiling::command_end>() - e.get_profiling_info<sycl::info::event_profiling::command_start>();
+			allTime += e.get_profiling_info<sycl::info::event_profiling::command_end>() - e.get_profiling_info<sycl::info::event_profiling::command_start>();
 			std::swap(deviceX1, deviceX2);
 
 			que.memcpy(diff, deviceDiff, numberEquations * sizeof(T)).wait();
 			que.memcpy(x, deviceX1, numberEquations * sizeof(T)).wait();
 
-			if (getNorm(diff, numberEquations) / getNorm(x, numberEquations) < targetAccuracy) {
+			if (vectorNorm(diff, numberEquations) / vectorNorm(x, numberEquations) < targetAccuracy) {
 				break;
 			}
 		}
@@ -215,7 +218,7 @@ void JacobiOnDevice(const sycl::device& device, const T* A, const T* b, const in
 		sycl::free(deviceX2, que);
 		sycl::free(deviceDiff, que);
 	}
-	std::cout << "[Device]    Time: " << static_cast<double>(timeExecution) / 10e6 << " ms Accuracy: " << getAchivedAccuracy(A, b, x, numberEquations) << std::endl;
+	std::cout << "[Device]    Time: " << static_cast<double>(allTime) / 10e6 << " ms Accuracy: " << achivedAccuracy(A, b, x, numberEquations) << " Iterations: " << it << std::endl;
 
 	delete[] x;
 }
@@ -275,7 +278,7 @@ int main(int argc, char* argv[]) {
 	double* b = new double[numberEquations];
 
 	getRandomMatrix(A, numberEquations, numberEquations);
-	getRandomVector(b, numberEquations);
+	getRandomVector(b, numberEquations); 
 
 	JacobiOnAccessors(device, A, b, numberEquations, targetAccuracy, maximalNumberIterations);
 	JacobiOnShared(device, A, b, numberEquations, targetAccuracy, maximalNumberIterations);
